@@ -9,6 +9,8 @@ import numpy as np
 #from numba import jit
 import freqopttest.util as util
 import freqopttest.kernel as kernel
+import statsmodels.api as sm
+from scipy.stats import chi2
 
 import scipy.stats as stats
 import theano
@@ -118,6 +120,21 @@ class LinearMMDTest(TwoSampleTest):
                 'h0_rejected': pval < self.alpha}
         return results
 
+    def perform_test_el(self, tst_data):
+        """perform the two-sample test and return values computed in a dictionary:
+        {alpha: 0.01, pvalue: 0.0002, test_stat: 2.3, h0_rejected: True, ...}
+        tst_data: an instance of TSTData
+        """
+        X, Y = tst_data.xy()
+        n = X.shape[0]
+        m2llr, pval = LinearMMDTest.two_moments_el(X, Y, self.kernel)
+        freedom = 1
+        chi2_threshold = chi2.isf(self.alpha, freedom)
+
+        results = {'alpha': self.alpha, 'pvalue': pval, 'test_stat': m2llr,
+                'h0_rejected': m2llr > chi2_threshold}
+        return results
+
     def compute_stat(self, tst_data):
         """Compute unbiased linear mmd estimator."""
         X, Y = tst_data.xy()
@@ -165,6 +182,44 @@ class LinearMMDTest(TwoSampleTest):
         lin_2nd = np.mean(h**2) 
         return lin_mmd, lin_2nd
 
+    @staticmethod
+    def two_moments_el(X, Y, kernel):
+        """Compute linear mmd estimator and a linear estimate of 
+        the uncentred 2nd moment of h(z, z'). Total cost: O(n).
+
+        return: (linear mmd, linear 2nd moment)
+        """
+        if X.shape[0] != Y.shape[0]:
+            raise ValueError('Require sample size of X = size of Y')
+        n = X.shape[0]
+        if n%2 == 1:
+            # make it even by removing the last row 
+            X = np.delete(X, -1, axis=0)
+            Y = np.delete(Y, -1, axis=0)
+
+        Xodd = X[::2, :]
+        Xeven = X[1::2, :]
+        assert Xodd.shape[0] == Xeven.shape[0]
+        Yodd = Y[::2, :]
+        Yeven = Y[1::2, :]
+        assert Yodd.shape[0] == Yeven.shape[0]
+        # linear mmd. O(n) 
+        xx = kernel.pair_eval(Xodd, Xeven)
+        yy = kernel.pair_eval(Yodd, Yeven)
+        xo_ye = kernel.pair_eval(Xodd, Yeven)
+        xe_yo = kernel.pair_eval(Xeven, Yodd)
+        h = xx + yy - xo_ye - xe_yo
+        el = sm.emplike.DescStat(h)
+        m2llr, pvalue, el_weight = el.test_mean(0, True)
+
+        """
+        Compute a linear-time estimate of the 2nd moment of h = E_z,z' h(z, z')^2.
+        Note that MMD = E_z,z' h(z, z').
+        Require O(n). Same trick as used in linear MMD to get O(n).
+        """
+
+        return m2llr, pvalue
+
 
     @staticmethod
     def variance(X, Y, kernel, lin_mmd=None):
@@ -185,7 +240,7 @@ class LinearMMDTest(TwoSampleTest):
         return var_mmd
 
     @staticmethod
-    def grid_search_kernel(tst_data, list_kernels, alpha):
+    def grid_search_kernel(tst_data, list_kernels, alpha, reg):
         """
         Return from the list the best kernel that maximizes the test power.
         The test power of the linear mmd is given by the CDF of a Gaussian. 
@@ -433,7 +488,7 @@ class QuadMMDTest(TwoSampleTest):
         return QuadMMDTest.h1_mean_var_gram(Kx, Ky, Kxy, is_var_computed, use_1sample_U)
 
     @staticmethod
-    def grid_search_kernel(tst_data, list_kernels, alpha):
+    def grid_search_kernel(tst_data, list_kernels, alpha, reg):
         """
         Return from the list the best kernel that maximizes the test power.
         The test power of the quadratic mmd under H1 is given by the CDF of a Gaussian. 
@@ -982,7 +1037,7 @@ class MeanEmbeddingTest(TwoSampleTest):
         return met
 
     @staticmethod
-    def optimize_locs_width(tst_data, alpha, n_test_locs=10, max_iter=400, 
+    def optimize_locs_width(tst_data, alpha, reg, n_test_locs=10, max_iter=400, 
             locs_step_size=0.1, gwidth_step_size=0.01, batch_proportion=1.0, 
             tol_fun=1e-3, seed=1):
         """Optimize the test locations and the Gaussian kernel width by 
